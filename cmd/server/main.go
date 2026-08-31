@@ -7,6 +7,9 @@ import (
 	"syscall"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+
+	"github.com/bootdotdev/learn-pub-sub-starter/internal/pubsub"
+	"github.com/bootdotdev/learn-pub-sub-starter/internal/routing"
 )
 
 func main() {
@@ -24,6 +27,28 @@ func main() {
 	defer conn.Close()
 
 	fmt.Println("Successfully connected to RabbitMQ!")
+
+	// Create a new RabbitMQ channel.
+	ch, err := conn.Channel()
+	if err != nil {
+		fmt.Println("Failed to open a channel:", err)
+		return
+	}
+	defer ch.Close()
+
+	// Publish a paused playing state to RabbitMQ.
+	err = pubsub.PublishJSON(
+		ch,
+		routing.ExchangePerilDirect,
+		routing.PauseKey,
+		routing.PlayingState{
+			IsPaused: true,
+		},
+	)
+	if err != nil {
+		fmt.Println("Failed to publish message:", err)
+		return
+	}
 
 	// Wait for Ctrl+C (SIGINT) or another termination signal.
 	sigChan := make(chan os.Signal, 1)
