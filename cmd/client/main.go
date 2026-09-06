@@ -2,9 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
-	"os/signal"
-	"syscall"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
@@ -52,11 +49,49 @@ func main() {
 	}
 	defer ch.Close()
 
-	// Wait for Ctrl+C (SIGINT) or another termination signal.
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	// Create a new game state for this user.
+	gamestate := gamelogic.NewGameState(username)
 
-	<-sigChan
+	// Start the client REPL.
+	for {
+		words := gamelogic.GetInput()
 
-	fmt.Println("Shutting down Peril client...")
+		if len(words) == 0 {
+			continue
+		}
+
+		switch words[0] {
+		case "spawn":
+			err := gamestate.CommandSpawn(words)
+			if err != nil {
+				fmt.Println("Error spawning unit:", err)
+				continue
+			}
+
+		case "move":
+			result, err := gamestate.CommandMove(words)
+			if err != nil {
+				fmt.Println("Error moving unit:", err)
+				continue
+			}
+
+			fmt.Println(result)
+
+		case "status":
+			gamestate.CommandStatus()
+
+		case "help":
+			gamelogic.PrintClientHelp()
+
+		case "spam":
+			fmt.Println("Spamming not allowed yet!")
+
+		case "quit":
+			gamelogic.PrintQuit()
+			return
+
+		default:
+			fmt.Println("Unknown command:", words[0])
+		}
+	}
 }
