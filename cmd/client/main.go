@@ -10,6 +10,18 @@ import (
 	"github.com/bootdotdev/learn-pub-sub-starter/internal/routing"
 )
 
+// handlerPause returns a handler function that processes pause messages
+// received from RabbitMQ.
+func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) {
+	return func(state routing.PlayingState) {
+		// Display a new prompt when the pause handler finishes.
+		defer fmt.Print("> ")
+
+		// Update the game state based on the pause/resume message.
+		gs.HandlePause(state)
+	}
+}
+
 func main() {
 	fmt.Println("Starting Peril client...")
 
@@ -33,24 +45,26 @@ func main() {
 		return
 	}
 
-	// Declare and bind a transient queue for this client.
+	// Create a new game state for this user.
+	gamestate := gamelogic.NewGameState(username)
+
+	// Subscribe to pause messages for this client.
+	// SubscribeJSON creates and binds the transient queue and calls
+	// handlerPause whenever a new PlayingState message is received.
 	queueName := routing.PauseKey + "." + username
 
-	ch, _, err := pubsub.DeclareAndBind(
+	err = pubsub.SubscribeJSON(
 		conn,
 		routing.ExchangePerilDirect,
 		queueName,
 		routing.PauseKey,
 		pubsub.Transient,
+		handlerPause(gamestate),
 	)
 	if err != nil {
-		fmt.Println("Failed to declare and bind queue:", err)
+		fmt.Println("Failed to subscribe to pause messages:", err)
 		return
 	}
-	defer ch.Close()
-
-	// Create a new game state for this user.
-	gamestate := gamelogic.NewGameState(username)
 
 	// Start the client REPL.
 	for {

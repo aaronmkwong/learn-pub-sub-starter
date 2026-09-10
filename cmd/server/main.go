@@ -29,6 +29,19 @@ func main() {
 
 	fmt.Println("Successfully connected to RabbitMQ!")
 
+	// Declare and bind the durable game logs queue.
+	_, _, err = pubsub.DeclareAndBind(
+		conn,
+		routing.ExchangePerilTopic,
+		routing.GameLogSlug,
+		routing.GameLogSlug+".*",
+		pubsub.Durable,
+	)
+	if err != nil {
+		fmt.Println("Failed to declare and bind game logs queue:", err)
+		return
+	}
+
 	// Create a new RabbitMQ channel.
 	ch, err := conn.Channel()
 	if err != nil {
