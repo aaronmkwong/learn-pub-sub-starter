@@ -3,6 +3,7 @@ package pubsub
 import (
 	"context"
 	"encoding/json"
+	"log"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -16,6 +17,21 @@ const (
 
 	// Transient queues are temporary and are deleted when the connection closes.
 	Transient SimpleQueueType = "transient"
+)
+
+// acktype determines how a consumed message should be acknowledged.
+type AckType string
+
+const (
+	// Ack acknowledges the message as successfully processed.
+	Ack AckType = "ack"
+
+	// NackRequeue negatively acknowledges the message and puts it back
+	// on the queue so it can be processed again.
+	NackRequeue AckType = "nack_requeue"
+
+	// NackDiscard negatively acknowledges the message and discards it.
+	NackDiscard AckType = "nack_discard"
 )
 
 // PublishJSON converts a Go value to JSON and publishes it to RabbitMQ.
@@ -108,7 +124,7 @@ func SubscribeJSON[T any](
 	queueName,
 	key string,
 	queueType SimpleQueueType,
-	handler func(T),
+	handler func(T) AckType,
 ) error {
 	// Make sure the queue exists and is bound to the exchange.
 	// DeclareAndBind also gives us the channel we'll use to consume messages.
@@ -147,25 +163,71 @@ func SubscribeJSON[T any](
 		defer ch.Close()
 
 		// Continue receiving messages until the deliveries channel closes.
-		for delivery := range deliveries {
+		for msg := range deliveries {
 			var val T
 
 			// Convert the raw message body from JSON bytes back into
 			// the generic Go type T.
-			err := json.Unmarshal(delivery.Body, &val)
+			err := json.Unmarshal(msg.Body, &val)
 			if err != nil {
-				// Skip malformed JSON messages.
+				// Malformed JSON cannot be processed, so discard it
+				// instead of leaving it unacknowledged and allowing
+				// RabbitMQ to redeliver it later.
+				log.Println("Malformed JSON; discarding message:", err)
+
+				err := msg.Nack(false, false)
+				if err != nil {
+					log.Println("Failed to nack malformed message:", err)
+				}
+
 				continue
 			}
 
-			// Pass the decoded message to the caller's handler function.
-			handler(val)
+			// Let the handler process the message and determine
+			// how RabbitMQ should handle the message afterward.
+			ack := handler(val)
 
-			// Manually acknowledge the message so RabbitMQ knows
-			// it has been successfully processed.
-			err = delivery.Ack(false)
-			if err != nil {
-				continue
+			switch ack {
+			case Ack:
+				// Acknowledge successful processing.
+				log.Println("Message acknowledged")
+
+				err := msg.Ack(false)
+				if err != nil {
+					log.Println("Failed to acknowledge message:", err)
+				}
+
+			case NackRequeue:
+				// Reject the message and put it back on the queue
+				// so it can be processed again.
+				log.Println("Message negatively acknowledged and requeued")
+
+				err := msg.Nack(false, true)
+				if err != nil {
+					log.Println("Failed to nack and requeue message:", err)
+				}
+
+			case NackDiscard:
+				// Reject the message and discard it instead of requeuing.
+				log.Println("Message negatively acknowledged and discarded")
+
+				err := msg.Nack(false, false)
+				if err != nil {
+					log.Println("Failed to nack and discard message:", err)
+				}
+
+			default:
+				// An unexpected acktype is treated as unsafe to retry.
+				// Discard the message rather than leaving it unacknowledged.
+				log.Printf(
+					"Unexpected acktype %q; discarding message",
+					ack,
+				)
+
+				err := msg.Nack(false, false)
+				if err != nil {
+					log.Println("Failed to nack unexpected acktype message:", err)
+				}
 			}
 		}
 	}()

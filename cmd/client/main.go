@@ -10,37 +10,40 @@ import (
 	"github.com/bootdotdev/learn-pub-sub-starter/internal/routing"
 )
 
-// handlerPause returns a handler function that processes pause messages
-// received from RabbitMQ.
-func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) {
-	return func(state routing.PlayingState) {
-		// Display a new prompt when the handler finishes.
+// handlerPause returns a handler function that processes pause messages.
+// Pause messages should always be acknowledged.
+func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) pubsub.AckType {
+	return func(state routing.PlayingState) pubsub.AckType {
 		defer fmt.Print("> ")
 
-		// Update the game state based on the pause/resume message.
 		gs.HandlePause(state)
+
+		return pubsub.Ack
 	}
 }
 
-// handlerMove returns a handler function that processes move messages
-// received from RabbitMQ.
-func handlerMove(gs *gamelogic.GameState) func(gamelogic.ArmyMove) {
-	return func(move gamelogic.ArmyMove) {
-		// Display a new prompt when the handler finishes.
+// handlerMove returns a handler function that processes move messages.
+// Safe moves and moves that make war are acknowledged.
+// Moves involving the same player or any other outcome are discarded.
+func handlerMove(gs *gamelogic.GameState) func(gamelogic.ArmyMove) pubsub.AckType {
+	return func(move gamelogic.ArmyMove) pubsub.AckType {
 		defer fmt.Print("> ")
 
-		// Update the game state based on the received move.
-		gs.HandleMove(move)
+		outcome := gs.HandleMove(move)
+
+		if outcome == gamelogic.MoveOutComeSafe ||
+			outcome == gamelogic.MoveOutcomeMakeWar {
+			return pubsub.Ack
+		}
+
+		return pubsub.NackDiscard
 	}
 }
 
 func main() {
 	fmt.Println("Starting Peril client...")
 
-	// Connection string for the local RabbitMQ server.
 	connString := "amqp://guest:guest@localhost:5672/"
-
-	// Connect to RabbitMQ.
 	conn, err := amqp.Dial(connString)
 	if err != nil {
 		fmt.Println("Failed to connect to RabbitMQ:", err)
@@ -51,8 +54,7 @@ func main() {
 	fmt.Println("Successfully connected to RabbitMQ!")
 
 	// Create one channel for publishing moves.
-	// This channel is reused for every publish instead of creating
-	// a new channel each time the player moves.
+	// Reuse it for every move instead of creating a new channel each time.
 	ch, err := conn.Channel()
 	if err != nil {
 		fmt.Println("Failed to open RabbitMQ channel:", err)
@@ -60,18 +62,15 @@ func main() {
 	}
 	defer ch.Close()
 
-	// Get the client's username.
 	username, err := gamelogic.ClientWelcome()
 	if err != nil {
 		fmt.Println("Failed to get username:", err)
 		return
 	}
 
-	// Create a new game state for this user.
 	gamestate := gamelogic.NewGameState(username)
 
-	// Subscribe to pause messages for this client.
-	// The transient queue is bound to the pause routing key.
+	// Subscribe to pause/resume messages for this client.
 	pauseQueueName := routing.PauseKey + "." + username
 
 	err = pubsub.SubscribeJSON(
@@ -87,9 +86,9 @@ func main() {
 		return
 	}
 
-	// Subscribe to move messages from all players.
-	// The queue has a username-specific name, but the binding key
-	// uses a wildcard so it receives moves from any player.
+	// Subscribe to move messages for this client.
+	// The wildcard binding allows the client to receive moves
+	// published to army_moves.<any-username>.
 	moveQueueName := routing.ArmyMovesPrefix + "." + username
 
 	err = pubsub.SubscribeJSON(
@@ -105,10 +104,8 @@ func main() {
 		return
 	}
 
-	// Start the client REPL.
 	for {
 		words := gamelogic.GetInput()
-
 		if len(words) == 0 {
 			continue
 		}
@@ -128,12 +125,9 @@ func main() {
 				continue
 			}
 
-			// Build the concrete routing key for this player's move.
-			// Unlike the subscription binding key, this does not use
-			// a wildcard because the message belongs to this username.
+			// Publish the move using the concrete username routing key.
 			moveKey := routing.ArmyMovesPrefix + "." + username
 
-			// Publish the move using the shared channel created above.
 			err = pubsub.PublishJSON(
 				ch,
 				routing.ExchangePerilTopic,
