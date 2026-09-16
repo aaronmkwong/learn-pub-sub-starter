@@ -20,4 +20,8 @@ const (
 
 	// ExchangePerilTopic is the topic exchange used for player move messages.
 	ExchangePerilTopic = "peril_topic"
+
+	// ExchangePerilDeadLetter is the fanout exchange used for dead letters.
+	ExchangePerilDeadLetter = "peril_dlx"
+
 )

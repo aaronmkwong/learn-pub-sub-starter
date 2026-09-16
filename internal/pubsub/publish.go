@@ -6,6 +6,8 @@ import (
 	"log"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+
+	"github.com/bootdotdev/learn-pub-sub-starter/internal/routing"
 )
 
 // SimpleQueueType identifies whether a queue should be durable or transient.
@@ -19,7 +21,7 @@ const (
 	Transient SimpleQueueType = "transient"
 )
 
-// acktype determines how a consumed message should be acknowledged.
+// AckType determines how a consumed message should be acknowledged.
 type AckType string
 
 const (
@@ -80,14 +82,21 @@ func DeclareAndBind(
 	autoDelete := queueType == Transient
 	exclusive := queueType == Transient
 
-	// Declare the queue with the appropriate durability/lifetime settings.
+	// Configure the queue to send rejected/discarded messages
+	// to the dead letter exchange.
+	queueArgs := amqp.Table{
+		"x-dead-letter-exchange": routing.ExchangePerilDeadLetter,
+	}
+
+	// Declare the queue with the appropriate durability/lifetime settings
+	// and the dead letter exchange configuration.
 	queue, err := ch.QueueDeclare(
 		queueName,
 		durable,
 		autoDelete,
 		exclusive,
-		false, // no-wait: wait for RabbitMQ's response
-		nil,   // no additional arguments
+		false,     // no-wait: wait for RabbitMQ's response
+		queueArgs, // queue arguments, including the dead letter exchange
 	)
 	if err != nil {
 		// The channel is no longer needed because queue creation failed.
