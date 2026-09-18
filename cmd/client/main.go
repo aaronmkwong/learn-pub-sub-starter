@@ -23,20 +23,96 @@ func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) pubsub.Ack
 }
 
 // handlerMove returns a handler function that processes move messages.
-// Safe moves and moves that make war are acknowledged.
-// Moves involving the same player or any other outcome are discarded.
-func handlerMove(gs *gamelogic.GameState) func(gamelogic.ArmyMove) pubsub.AckType {
+// The AMQP channel is used to publish war recognition messages when
+// a move results in war.
+func handlerMove(
+	gs *gamelogic.GameState,
+	ch *amqp.Channel,
+	username string,
+) func(gamelogic.ArmyMove) pubsub.AckType {
 	return func(move gamelogic.ArmyMove) pubsub.AckType {
 		defer fmt.Print("> ")
 
 		outcome := gs.HandleMove(move)
 
-		if outcome == gamelogic.MoveOutComeSafe ||
-			outcome == gamelogic.MoveOutcomeMakeWar {
+		// A safe move has been handled successfully.
+		if outcome == gamelogic.MoveOutComeSafe {
 			return pubsub.Ack
 		}
 
+		// A move that makes war needs to publish a war recognition
+		// message so another client can handle the war.
+		if outcome == gamelogic.MoveOutcomeMakeWar {
+			warKey := routing.WarRecognitionsPrefix + "." + username
+
+			war := gamelogic.RecognitionOfWar{
+				Attacker: move.Player,
+				Defender: gs.GetPlayerSnap(),
+			}
+
+			err := pubsub.PublishJSON(
+				ch,
+				routing.ExchangePerilTopic,
+				warKey,
+				war,
+			)
+			if err != nil {
+				fmt.Println("Failed to publish war recognition:", err)
+
+				// The war message was not published successfully,
+				// so requeue the original move for another attempt.
+				return pubsub.NackRequeue
+			}
+
+			// Requeue the original move because the resulting war
+			// needs to be handled by another client.
+			return pubsub.NackRequeue
+		}
+
+		// Moves involving the same player or any other outcome
+		// should be discarded.
 		return pubsub.NackDiscard
+	}
+}
+
+// handlerWar returns a handler function that processes war recognition
+// messages. Only the client involved in the war should process it;
+// other clients requeue the message so another client can try.
+func handlerWar(gs *gamelogic.GameState) func(gamelogic.RecognitionOfWar) pubsub.AckType {
+	return func(war gamelogic.RecognitionOfWar) pubsub.AckType {
+		defer fmt.Print("> ")
+
+		// HandleWar returns the outcome as well as the winner and loser.
+		// The winner and loser are not needed here.
+		outcome, _, _ := gs.HandleWar(war)
+
+		switch outcome {
+		case gamelogic.WarOutcomeNotInvolved:
+			// This client is not involved in the war, so put the
+			// message back on the shared queue for another client.
+			return pubsub.NackRequeue
+
+		case gamelogic.WarOutcomeNoUnits:
+			// The war cannot be processed because there are no units.
+			return pubsub.NackDiscard
+
+		case gamelogic.WarOutcomeOpponentWon:
+			// The war was resolved successfully.
+			return pubsub.Ack
+
+		case gamelogic.WarOutcomeYouWon:
+			// The war was resolved successfully.
+			return pubsub.Ack
+
+		case gamelogic.WarOutcomeDraw:
+			// The war was resolved successfully.
+			return pubsub.Ack
+
+		default:
+			// An unexpected outcome should not be retried.
+			fmt.Println("Error: unexpected war outcome:", outcome)
+			return pubsub.NackDiscard
+		}
 	}
 }
 
@@ -53,8 +129,8 @@ func main() {
 
 	fmt.Println("Successfully connected to RabbitMQ!")
 
-	// Create one channel for publishing moves.
-	// Reuse it for every move instead of creating a new channel each time.
+	// Create one channel for publishing moves and war recognitions.
+	// Reuse it instead of creating a new channel for every publish.
 	ch, err := conn.Channel()
 	if err != nil {
 		fmt.Println("Failed to open RabbitMQ channel:", err)
@@ -97,10 +173,26 @@ func main() {
 		moveQueueName,
 		routing.ArmyMovesPrefix+".*",
 		pubsub.Transient,
-		handlerMove(gamestate),
+		handlerMove(gamestate, ch, username),
 	)
 	if err != nil {
 		fmt.Println("Failed to subscribe to move messages:", err)
+		return
+	}
+
+	// Subscribe to war recognition messages.
+	// All clients share the durable "war" queue, so only one client
+	// consumes each war message at a time.
+	err = pubsub.SubscribeJSON(
+		conn,
+		routing.ExchangePerilTopic,
+		"war",
+		routing.WarRecognitionsPrefix+".*",
+		pubsub.Durable,
+		handlerWar(gamestate),
+	)
+	if err != nil {
+		fmt.Println("Failed to subscribe to war messages:", err)
 		return
 	}
 
