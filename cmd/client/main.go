@@ -23,7 +23,7 @@ func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) pubsub.Ack
 }
 
 // handlerMove returns a handler function that processes move messages.
-// The AMQP channel is used to publish war recognition messages when
+// The AMQP channel is used to publish a war recognition message when
 // a move results in war.
 func handlerMove(
 	gs *gamelogic.GameState,
@@ -59,14 +59,14 @@ func handlerMove(
 			if err != nil {
 				fmt.Println("Failed to publish war recognition:", err)
 
-				// The war message was not published successfully,
-				// so requeue the original move for another attempt.
+				// Requeue the move because the war declaration
+				// was not successfully published.
 				return pubsub.NackRequeue
 			}
 
-			// Requeue the original move because the resulting war
-			// needs to be handled by another client.
-			return pubsub.NackRequeue
+			// The move was successfully processed and the war
+			// declaration was successfully published.
+			return pubsub.Ack
 		}
 
 		// Moves involving the same player or any other outcome
@@ -76,14 +76,15 @@ func handlerMove(
 }
 
 // handlerWar returns a handler function that processes war recognition
-// messages. Only the client involved in the war should process it;
-// other clients requeue the message so another client can try.
+// messages. All clients consume from the shared "war" queue.
+// A client not involved in the war requeues the message so another
+// client can try to process it.
 func handlerWar(gs *gamelogic.GameState) func(gamelogic.RecognitionOfWar) pubsub.AckType {
 	return func(war gamelogic.RecognitionOfWar) pubsub.AckType {
 		defer fmt.Print("> ")
 
 		// HandleWar returns the outcome as well as the winner and loser.
-		// The winner and loser are not needed here.
+		// The winner and loser are not needed by this handler.
 		outcome, _, _ := gs.HandleWar(war)
 
 		switch outcome {
@@ -97,15 +98,15 @@ func handlerWar(gs *gamelogic.GameState) func(gamelogic.RecognitionOfWar) pubsub
 			return pubsub.NackDiscard
 
 		case gamelogic.WarOutcomeOpponentWon:
-			// The war was resolved successfully.
+			// The war was successfully resolved.
 			return pubsub.Ack
 
 		case gamelogic.WarOutcomeYouWon:
-			// The war was resolved successfully.
+			// The war was successfully resolved.
 			return pubsub.Ack
 
 		case gamelogic.WarOutcomeDraw:
-			// The war was resolved successfully.
+			// The war was successfully resolved.
 			return pubsub.Ack
 
 		default:
