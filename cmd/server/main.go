@@ -42,6 +42,8 @@ func main() {
 		return
 	}
 
+	fmt.Println("Declared and bound queue:", routing.GameLogSlug)
+
 	// Create a new RabbitMQ channel.
 	ch, err := conn.Channel()
 	if err != nil {

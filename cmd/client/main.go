@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
@@ -9,6 +10,29 @@ import (
 	"github.com/bootdotdev/learn-pub-sub-starter/internal/pubsub"
 	"github.com/bootdotdev/learn-pub-sub-starter/internal/routing"
 )
+
+// publishGameLog creates and publishes a GameLog using gob encoding.
+func publishGameLog(
+	ch *amqp.Channel,
+	username string,
+	message string,
+) error {
+	gameLog := routing.GameLog{
+		CurrentTime: time.Now(),
+		Message:     message,
+		Username:    username,
+	}
+
+	// Game logs use the game_logs.<username> routing key.
+	logKey := routing.GameLogSlug + "." + username
+
+	return pubsub.PublishGob(
+		ch,
+		routing.ExchangePerilTopic,
+		logKey,
+		gameLog,
+	)
+}
 
 // handlerPause returns a handler function that processes pause messages.
 // Pause messages should always be acknowledged.
@@ -64,8 +88,6 @@ func handlerMove(
 				return pubsub.NackRequeue
 			}
 
-			// The move was successfully processed and the war
-			// declaration was successfully published.
 			return pubsub.Ack
 		}
 
@@ -75,42 +97,77 @@ func handlerMove(
 	}
 }
 
-// handlerWar returns a handler function that processes war recognition
-// messages. All clients consume from the shared "war" queue.
-// A client not involved in the war requeues the message so another
-// client can try to process it.
-func handlerWar(gs *gamelogic.GameState) func(gamelogic.RecognitionOfWar) pubsub.AckType {
+// handlerWar processes war recognition messages.
+// All clients consume from the shared "war" queue.
+func handlerWar(
+	gs *gamelogic.GameState,
+	ch *amqp.Channel,
+) func(gamelogic.RecognitionOfWar) pubsub.AckType {
 	return func(war gamelogic.RecognitionOfWar) pubsub.AckType {
 		defer fmt.Print("> ")
 
-		// HandleWar returns the outcome as well as the winner and loser.
-		// The winner and loser are not needed by this handler.
-		outcome, _, _ := gs.HandleWar(war)
+		// HandleWar returns the outcome, winner, and loser.
+		// Winner and loser are already strings containing player names.
+		outcome, winner, loser := gs.HandleWar(war)
 
 		switch outcome {
 		case gamelogic.WarOutcomeNotInvolved:
-			// This client is not involved in the war, so put the
-			// message back on the shared queue for another client.
+			// This client is not involved in the war, so let another
+			// client try to process the message.
 			return pubsub.NackRequeue
 
 		case gamelogic.WarOutcomeNoUnits:
 			// The war cannot be processed because there are no units.
 			return pubsub.NackDiscard
 
-		case gamelogic.WarOutcomeOpponentWon:
-			// The war was successfully resolved.
-			return pubsub.Ack
+		case gamelogic.WarOutcomeOpponentWon,
+			gamelogic.WarOutcomeYouWon:
 
-		case gamelogic.WarOutcomeYouWon:
-			// The war was successfully resolved.
+			message := fmt.Sprintf(
+				"%s won a war against %s",
+				winner,
+				loser,
+			)
+
+			// Use the attacker's username because that player
+			// initiated the war.
+			err := publishGameLog(
+				ch,
+				war.Attacker.Username,
+				message,
+			)
+			if err != nil {
+				fmt.Println("Failed to publish game log:", err)
+
+				// Requeue the war because the game log was not
+				// successfully published.
+				return pubsub.NackRequeue
+			}
+
 			return pubsub.Ack
 
 		case gamelogic.WarOutcomeDraw:
-			// The war was successfully resolved.
+			message := fmt.Sprintf(
+				"A war between %s and %s resulted in a draw",
+				winner,
+				loser,
+			)
+
+			// Use the attacker's username because that player
+			// initiated the war.
+			err := publishGameLog(
+				ch,
+				war.Attacker.Username,
+				message,
+			)
+			if err != nil {
+				fmt.Println("Failed to publish game log:", err)
+				return pubsub.NackRequeue
+			}
+
 			return pubsub.Ack
 
 		default:
-			// An unexpected outcome should not be retried.
 			fmt.Println("Error: unexpected war outcome:", outcome)
 			return pubsub.NackDiscard
 		}
@@ -130,8 +187,8 @@ func main() {
 
 	fmt.Println("Successfully connected to RabbitMQ!")
 
-	// Create one channel for publishing moves and war recognitions.
-	// Reuse it instead of creating a new channel for every publish.
+	// Create one channel for publishing moves, war recognitions,
+	// and game logs.
 	ch, err := conn.Channel()
 	if err != nil {
 		fmt.Println("Failed to open RabbitMQ channel:", err)
@@ -182,15 +239,14 @@ func main() {
 	}
 
 	// Subscribe to war recognition messages.
-	// All clients share the durable "war" queue, so only one client
-	// consumes each war message at a time.
+	// All clients share the durable "war" queue.
 	err = pubsub.SubscribeJSON(
 		conn,
 		routing.ExchangePerilTopic,
 		"war",
 		routing.WarRecognitionsPrefix+".*",
 		pubsub.Durable,
-		handlerWar(gamestate),
+		handlerWar(gamestate, ch),
 	)
 	if err != nil {
 		fmt.Println("Failed to subscribe to war messages:", err)
@@ -199,6 +255,7 @@ func main() {
 
 	for {
 		words := gamelogic.GetInput()
+
 		if len(words) == 0 {
 			continue
 		}
