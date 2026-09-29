@@ -10,6 +10,25 @@ import (
 	"github.com/bootdotdev/learn-pub-sub-starter/internal/routing"
 )
 
+// handlerGameLog returns a handler function that processes game log messages.
+// Each received log is written to disk.
+func handlerGameLog(gameLog routing.GameLog) pubsub.AckType {
+	// Display a new prompt when the handler finishes.
+	defer fmt.Print("> ")
+
+	// Write the received game log to disk.
+	err := gamelogic.WriteLog(gameLog)
+	if err != nil {
+		fmt.Println("Failed to write game log:", err)
+
+		// Requeue the message so the server can try again.
+		return pubsub.NackRequeue
+	}
+
+	// The log was successfully written.
+	return pubsub.Ack
+}
+
 func main() {
 	fmt.Println("Starting Peril server...")
 
@@ -29,22 +48,23 @@ func main() {
 
 	fmt.Println("Successfully connected to RabbitMQ!")
 
-	// Declare and bind the durable game logs queue.
-	_, _, err = pubsub.DeclareAndBind(
+	// Subscribe to game log messages.
+	// The durable game_logs queue is shared by the server and uses a
+	// wildcard routing key so it receives logs from every client.
+	err = pubsub.SubscribeGob(
 		conn,
 		routing.ExchangePerilTopic,
 		routing.GameLogSlug,
 		routing.GameLogSlug+".*",
 		pubsub.Durable,
+		handlerGameLog,
 	)
 	if err != nil {
-		fmt.Println("Failed to declare and bind game logs queue:", err)
+		fmt.Println("Failed to subscribe to game logs:", err)
 		return
 	}
 
-	fmt.Println("Declared and bound queue:", routing.GameLogSlug)
-
-	// Create a new RabbitMQ channel.
+	// Create a RabbitMQ channel for publishing pause/resume messages.
 	ch, err := conn.Channel()
 	if err != nil {
 		fmt.Println("Failed to open a channel:", err)
