@@ -180,6 +180,21 @@ func subscribe[T any](
 		return err
 	}
 
+	// Limit each consumer to 10 unacknowledged messages at a time.
+	// The third argument is false so the limit applies per consumer,
+	// rather than globally across all consumers on this channel.
+	err = ch.Qos(
+		10,    // prefetch count
+		0,     // prefetch size: unlimited
+		false, // apply QoS per consumer
+	)
+	if err != nil {
+		// QoS configuration failed, so the channel is no longer needed.
+		ch.Close()
+
+		return err
+	}
+
 	// Start consuming messages from the queue.
 	deliveries, err := ch.Consume(
 		queue.Name, // queue to consume from
